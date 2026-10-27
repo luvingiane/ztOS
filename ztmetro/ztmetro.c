@@ -405,6 +405,7 @@ struct zt_keyboard {
 	struct wl_list link;
 	struct zt_server *server;
 	struct wlr_keyboard *wlr_keyboard;
+	bool is_slider;	/* the alert slider's gpio-keys, not a keyboard */
 	struct wl_listener modifiers, key, destroy;
 };
 
@@ -701,6 +702,20 @@ struct zt_server {
 	char dialog_act2[64];
 	double dialog_btn_y, dialog_btn_h;
 	bool dialog_stacked;
+	/* the dialog as a list of rows instead of buttons (the power menu):
+	 * each row an icon (POWER_ICON_*), a label and an action, red or white */
+	int dialog_rows;
+	char dialog_row_label[4][32], dialog_row_act[4][40];
+	int dialog_row_icon[4];
+	bool dialog_row_red[4];
+	double dialog_rows_y, dialog_row_h;
+	/* power key held: the power menu instead of the screen toggle */
+	struct wl_event_source *power_hold_timer;
+	bool power_hold_done;
+	/* the alert slider (OnePlus 2): which end is held, the mode it set
+	 * (SLIDER_*, -1 before the first look) and the ring volume to go back to */
+	bool slider_top, slider_bottom, dnd;
+	int slider_mode, ring_before_slider;
 	struct zt_layer dialog_layer;
 	/* colour temperature: every pixel multiplied by this */
 	int tone_k;			/* Kelvin; 6500 is no change */
@@ -2998,6 +3013,7 @@ static void load_config(struct zt_server *server) {
 	server->key_height = DEFAULT_KEY_HEIGHT;
 	server->key_sound = true;
 	server->ring_volume = 21;
+	server->slider_mode = -1;
 	server->screen_timeout = SCREEN_TIMEOUT_S;
 	if (server->shade_brightness <= 0) {
 		server->shade_brightness = 50;
@@ -9910,7 +9926,8 @@ static void draw_volume(struct zt_server *server) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	draw_text(cr, text, FONT_SEMILIGHT, 26, 16, 8, 0, 0, false);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	draw_text(cr, server->volume_is_media ? "media + apps" : (level ? "ringer + notifications" : "vibrate"), FONT_REGULAR, 12, 108, 20, 0, 0, false);
+	draw_text(cr, server->volume_is_media ? "media + apps" : server->dnd ? "do not disturb" :
+		(level ? "ringer + notifications" : "vibrate"), FONT_REGULAR, 12, 108, 20, 0, 0, false);
 	cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
 	cairo_rectangle(cr, 16, VOLUME_H - 9, server->width - 32, 3);
 	cairo_fill(cr);
@@ -10046,7 +10063,9 @@ static void note_add_from(struct zt_server *server, const char *who, const char 
 		draw_shade(server);
 	}
 	lock_notes_changed(server);
-	hap(server, HAP_HEAVY, HG_SYSTEM);
+	if (!server->dnd) {
+		hap(server, HAP_HEAVY, HG_SYSTEM);
+	}
 	damage(server);
 }
 
@@ -10058,8 +10077,94 @@ static void note_add(struct zt_server *server, const char *app, const char *titl
 /* ztOS Python SDK Dialog style: panel background #1f1f1f, margins (24, 40, 24, 20),
  * title FONT_SEMIBOLD 20pt, body FONT_REGULAR 15pt, buttons with 2px solid white border,
  * transparent background, height 40px in a row with 12px spacing. */
+/* The power menu's icons, drawn in the row's colour inside a circle of
+ * radius r (Windows Phone draws its round icons the same way). */
+enum { POWER_ICON_OFF, POWER_ICON_RESTART, POWER_ICON_FASTBOOT, POWER_ICON_RECOVERY };
+
+static void draw_power_icon(cairo_t *cr, int icon, double cx, double cy, double r) {
+	cairo_set_line_width(cr, 2.0);
+	cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
+	cairo_stroke(cr);
+	double s = r * 0.5;
+	cairo_set_line_width(cr, 2.5);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	if (icon == POWER_ICON_OFF) {
+		/* the power symbol: a ring open at the top, a bar through the gap */
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, cx, cy, s, -M_PI / 2 + 0.75, 3 * M_PI / 2 - 0.75);
+		cairo_stroke(cr);
+		cairo_move_to(cr, cx, cy - s * 1.25);
+		cairo_line_to(cr, cx, cy - s * 0.2);
+		cairo_stroke(cr);
+	} else if (icon == POWER_ICON_RESTART) {
+		/* a circular arrow */
+		double a0 = -M_PI / 2 + 0.5, a1 = 3 * M_PI / 2 - 0.1;
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, cx, cy, s, a0, a1);
+		cairo_stroke(cr);
+		double px = cx + s * cos(a0), py = cy + s * sin(a0);
+		double tx = sin(a0), ty = -cos(a0);	/* back along the arc */
+		double nx = cos(a0), ny = sin(a0);
+		cairo_move_to(cr, px + tx * s * 0.55, py + ty * s * 0.55);
+		cairo_line_to(cr, px + nx * s * 0.4, py + ny * s * 0.4);
+		cairo_line_to(cr, px - nx * s * 0.4, py - ny * s * 0.4);
+		cairo_close_path(cr);
+		cairo_fill(cr);
+	} else if (icon == POWER_ICON_FASTBOOT) {
+		/* a lightning bolt: flashing */
+		static const double bolt[][2] = { { 0.2, -1.1 }, { -0.55, 0.15 }, { 0.0, 0.15 },
+			{ -0.2, 1.1 }, { 0.55, -0.15 }, { 0.0, -0.15 } };
+		cairo_move_to(cr, cx + bolt[0][0] * s, cy + bolt[0][1] * s);
+		for (int i = 1; i < 6; i++)
+			cairo_line_to(cr, cx + bolt[i][0] * s, cy + bolt[i][1] * s);
+		cairo_close_path(cr);
+		cairo_fill(cr);
+	} else {
+		/* a cross: first aid, the recovery system */
+		double t = s * 0.3, l = s * 1.0;
+		cairo_rectangle(cr, cx - t, cy - l, 2 * t, 2 * l);
+		cairo_rectangle(cr, cx - l, cy - t, 2 * l, 2 * t);
+		cairo_fill(cr);
+	}
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+}
+
+/* The dialog as a list of rows: title, then one row per choice, every row
+ * as tall as a finger; tap outside to cancel. */
+static void draw_dialog_rows(struct zt_server *server) {
+	double w = server->width, pad = 24.0;
+	double title_y = 40.0, rows_y = title_y + 28.0 + 16.0, row_h = 72.0;
+	double total_h = rows_y + server->dialog_rows * row_h + 20.0;
+	server->dialog_h = total_h;
+	server->dialog_rows_y = rows_y;
+	server->dialog_row_h = row_h;
+
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, (int)w, (int)total_h, &cr);
+	cairo_set_source_rgb(cr, 31.0 / 255.0, 31.0 / 255.0, 31.0 / 255.0);
+	cairo_rectangle(cr, 0, 0, w, total_h);
+	cairo_fill(cr);
+	cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+	draw_text(cr, server->dialog_title, FONT_SEMIBOLD, 20.0, pad, title_y, w - 2 * pad, 0, false);
+	for (int i = 0; i < server->dialog_rows; i++) {
+		double y = rows_y + i * row_h;
+		if (server->dialog_row_red[i])
+			cairo_set_source_rgb(cr, 0xe5 / 255.0, 0x14 / 255.0, 0.0);	/* Metro red */
+		else
+			cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+		draw_power_icon(cr, server->dialog_row_icon[i], pad + 24.0, y + row_h / 2, 22.0);
+		draw_text(cr, server->dialog_row_label[i], FONT_SEMILIGHT, 24.0, pad + 64.0, y,
+			w - 2 * pad - 64.0, row_h, false);
+	}
+	zt_buffer_show(server, &server->dialog_layer, buffer, cr, (int)w, (int)total_h);
+}
+
 static void draw_dialog(struct zt_server *server) {
 	if (server->width <= 0) return;
+	if (server->dialog_rows) {
+		draw_dialog_rows(server);
+		return;
+	}
 
 	double w = server->width;
 	double pad = 24.0;
@@ -10187,6 +10292,18 @@ static void dialog_handle_action(struct zt_server *server, const char *act) {
 		run_detached("reboot", "recovery", NULL, NULL);
 		run_detached("systemctl", "reboot", NULL, NULL);
 		run_detached("/bin/sh", "-c", "sudo -n systemctl reboot --reboot-argument=recovery 2>/dev/null", NULL);
+	} else if (strcmp(act, "poweroff") == 0) {
+		run_detached("systemctl", "poweroff", NULL, NULL);
+	} else if (strcmp(act, "reboot") == 0) {
+		run_detached("systemctl", "reboot", NULL, NULL);
+	} else if (strcmp(act, "reboot_bootloader") == 0) {
+		/* root only: sudoers allows exactly this command */
+		run_detached("/bin/sh", "-c",
+			"sudo -n /usr/bin/systemctl reboot --reboot-argument=bootloader", NULL);
+	} else if (strcmp(act, "reboot_recovery_only") == 0) {
+		/* unlike reboot_recovery, no plain reboot racing it */
+		run_detached("/bin/sh", "-c",
+			"sudo -n /usr/bin/systemctl reboot --reboot-argument=recovery", NULL);
 	} else if (strcmp(act, "stop_sensorhub") == 0) {
 		pipe_tell("/run/ztoscsf.ctl", "stop_sensorhub\n");
 		run_detached("/bin/sh", "-c",
@@ -10202,6 +10319,7 @@ static void dialog_handle_action(struct zt_server *server, const char *act) {
 static void dialog_show(struct zt_server *server, const char *title, const char *text,
 		const char *btn1, const char *act1, const char *btn2, const char *act2) {
     if (server->auth_active && (!act1 || strcmp(act1, "auth_submit"))) return;
+	server->dialog_rows = 0;
 	snprintf(server->dialog_title, sizeof(server->dialog_title), "%s", title ? title : "Dialog");
 	snprintf(server->dialog_text, sizeof(server->dialog_text), "%s", text ? text : "");
 	snprintf(server->dialog_btn1, sizeof(server->dialog_btn1), "%s", btn1 ? btn1 : "ok");
@@ -10211,6 +10329,35 @@ static void dialog_show(struct zt_server *server, const char *title, const char 
 
 	if (server->width == 0) return;
 
+	draw_dialog(server);
+	server->dialog_open = true;
+	server->dialog_y = (float)-server->dialog_h;
+	animate(server, &server->dialog_y, 0.0f, 260, 0, false);
+	hap(server, HAP_TAP, HG_SYSTEM);
+	damage(server);
+}
+
+/* The power menu, opened by holding the power key: one screen, four rows.
+ * Fastboot and recovery go through sudo (ztmetro runs as the user; sudoers
+ * allows exactly those two commands). */
+static void power_menu_show(struct zt_server *server) {
+	static const struct { const char *label, *act; int icon; bool red; } rows[] = {
+		{ "Power off", "poweroff", POWER_ICON_OFF, true },
+		{ "Restart", "reboot", POWER_ICON_RESTART, false },
+		{ "Fastboot", "reboot_bootloader", POWER_ICON_FASTBOOT, false },
+		{ "Recovery", "reboot_recovery_only", POWER_ICON_RECOVERY, false },
+	};
+	if (server->auth_active || server->width == 0) return;
+	snprintf(server->dialog_title, sizeof(server->dialog_title), "Power");
+	server->dialog_text[0] = 0;
+	server->dialog_btn1[0] = server->dialog_btn2[0] = 0;
+	server->dialog_rows = 4;
+	for (int i = 0; i < 4; i++) {
+		snprintf(server->dialog_row_label[i], sizeof(server->dialog_row_label[i]), "%s", rows[i].label);
+		snprintf(server->dialog_row_act[i], sizeof(server->dialog_row_act[i]), "%s", rows[i].act);
+		server->dialog_row_icon[i] = rows[i].icon;
+		server->dialog_row_red[i] = rows[i].red;
+	}
 	draw_dialog(server);
 	server->dialog_open = true;
 	server->dialog_y = (float)-server->dialog_h;
@@ -10988,6 +11135,16 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
             !(server->auth_active && server->osk_visible && y >= server->height-NAV_H-server->osk_h)) {
 		if (y >= server->dialog_y && y <= server->dialog_y + server->dialog_h) {
 			double dy = y - server->dialog_y;
+			if (server->dialog_rows) {
+				int k = (int)floor((dy - server->dialog_rows_y) / server->dialog_row_h);
+				if (dy >= server->dialog_rows_y && k >= 0 && k < server->dialog_rows) {
+					hap(server, HAP_TAP, HG_SYSTEM);
+					dialog_handle_action(server, server->dialog_row_act[k]);
+					dialog_close(server);
+				}
+				p->role = ROLE_NONE;
+				return;
+			}
 			double pad = 24.0, btn_gap = 12.0;
 			double content_w = server->width - 2 * pad;
 			if (server->dialog_btn2[0]) {
@@ -12538,16 +12695,107 @@ static bool hardware_nav_keys(void) {
 	return back && home;
 }
 
+#define POWER_HOLD_MS 800
+static int power_hold_timeout(void *data) {
+	struct zt_server *server = data;
+	server->power_hold_done = true;
+	if (!server->screen_on) {
+		screen_set(server, true);
+	}
+	activity(server);
+	power_menu_show(server);
+	return 0;
+}
+
+/*
+ * The OnePlus 2's alert slider: gpio-keys holds KEY_F13 down at the top
+ * (silent), KEY_F15 at the bottom (ringer), neither in the middle (do not
+ * disturb), as OnePlus's tri_state_key driver reads it. Silent is the
+ * ringer at zero (vibrate); do not disturb is that without the buzz for
+ * notifications. The ring volume from before comes back at the bottom.
+ */
+enum { SLIDER_RING, SLIDER_DND, SLIDER_SILENT };
+
+static void slider_apply(struct zt_server *server, bool announce) {
+	int mode = server->slider_top ? SLIDER_SILENT : server->slider_bottom ? SLIDER_RING : SLIDER_DND;
+	if (mode == server->slider_mode) return;
+	server->slider_mode = mode;
+	if (mode == SLIDER_RING) {
+		if (!server->ring_volume)
+			server->ring_volume = server->ring_before_slider > 0 ?
+				server->ring_before_slider : VOLUME_MAX * 2 / 3;
+	} else {
+		if (server->ring_volume)
+			server->ring_before_slider = server->ring_volume;
+		server->ring_volume = 0;
+	}
+	server->dnd = mode == SLIDER_DND;
+	wlr_log(WLR_INFO, "alert slider: %s", mode == SLIDER_RING ? "ringer" :
+		mode == SLIDER_DND ? "do not disturb" : "silent");
+	if (!announce || !server->screen_on || server->width == 0) return;
+	server->volume_is_media = false;
+	draw_volume(server);
+	animate(server, &server->volume_y, 0.0f, 140, 0, false);
+	wl_event_source_timer_update(server->volume_timer, 2000);
+	if (mode == SLIDER_RING) {
+		ui_sound(server, UIS_PIP);
+	}
+}
+
+/* Where the slider is when ztmetro starts: gpio-keys reported it at boot,
+ * before anyone listened, so ask the device (needs read access to it;
+ * without, the first move tells). */
+static void slider_sync(struct zt_server *server) {
+	for (int i = 0; i < 32; i++) {
+		char path[32], name[64] = "";
+		snprintf(path, sizeof(path), "/dev/input/event%d", i);
+		int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0) continue;
+		unsigned long keys[KEY_MAX / (8 * sizeof(unsigned long)) + 1] = { 0 };
+		bool found = ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0 &&
+			strcasestr(name, "slider") && ioctl(fd, EVIOCGKEY(sizeof(keys)), keys) >= 0;
+		close(fd);
+		if (!found) continue;
+#define KEY_HELD(k) ((keys[(k) / (8 * sizeof(unsigned long))] >> ((k) % (8 * sizeof(unsigned long)))) & 1)
+		server->slider_top = KEY_HELD(KEY_F13);
+		server->slider_bottom = KEY_HELD(KEY_F15);
+#undef KEY_HELD
+		slider_apply(server, false);
+		return;
+	}
+}
+
 static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
 	struct zt_server *server = keyboard->server;
 	struct wlr_keyboard_key_event *event = data;
+	if (keyboard->is_slider) {
+		/* the slider is ours, screen on or off; no app sees it */
+		bool down = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
+		if (event->keycode == KEY_F13) server->slider_top = down;
+		if (event->keycode == KEY_F15) server->slider_bottom = down;
+		slider_apply(server, true);
+		return;
+	}
 	if (event->keycode == KEY_POWER) {
-		/* the power key sleeps and wakes the screen, and goes no further */
+		/* a short press sleeps and wakes the screen (on release), a long one
+		 * opens the power menu; the key goes no further */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-			screen_set(server, !server->screen_on);
-			if (server->screen_on) {
-				activity(server);
+			server->power_hold_done = false;
+			if (!server->power_hold_timer) {
+				server->power_hold_timer = wl_event_loop_add_timer(server->loop,
+					power_hold_timeout, server);
+			}
+			wl_event_source_timer_update(server->power_hold_timer, POWER_HOLD_MS);
+		} else {
+			if (server->power_hold_timer) {
+				wl_event_source_timer_update(server->power_hold_timer, 0);
+			}
+			if (!server->power_hold_done) {
+				screen_set(server, !server->screen_on);
+				if (server->screen_on) {
+					activity(server);
+				}
 			}
 		}
 		return;
@@ -12684,6 +12932,7 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		struct zt_keyboard *keyboard = calloc(1, sizeof(*keyboard));
 		keyboard->server = server;
 		keyboard->wlr_keyboard = wlr_keyboard;
+		keyboard->is_slider = device->name && strcasestr(device->name, "slider");
 		set_default_keymap(wlr_keyboard);
 		wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600);
 		keyboard->modifiers.notify = keyboard_handle_modifiers;
@@ -12694,6 +12943,9 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		wl_signal_add(&device->events.destroy, &keyboard->destroy);
 		wl_list_insert(&server->keyboards, &keyboard->link);
 		wlr_log(WLR_INFO, "keys: %s", device->name);
+		if (keyboard->is_slider) {
+			slider_sync(server);
+		}
 	}
 }
 
