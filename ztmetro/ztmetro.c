@@ -10082,6 +10082,7 @@ static void note_add(struct zt_server *server, const char *app, const char *titl
 enum { POWER_ICON_OFF, POWER_ICON_RESTART, POWER_ICON_FASTBOOT, POWER_ICON_RECOVERY };
 
 static void draw_power_icon(cairo_t *cr, int icon, double cx, double cy, double r) {
+	cairo_new_path(cr);	/* no line from where the last text ended */
 	cairo_set_line_width(cr, 2.0);
 	cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
 	cairo_stroke(cr);
@@ -10153,8 +10154,20 @@ static void draw_dialog_rows(struct zt_server *server) {
 		else
 			cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
 		draw_power_icon(cr, server->dialog_row_icon[i], pad + 24.0, y + row_h / 2, 22.0);
-		draw_text(cr, server->dialog_row_label[i], FONT_SEMILIGHT, 24.0, pad + 64.0, y,
-			w - 2 * pad - 64.0, row_h, false);
+		/* the label left-aligned, centred on the icon's line */
+		PangoLayout *lay = pango_cairo_create_layout(cr);
+		PangoFontDescription *fd = pango_font_description_from_string(FONT_SEMILIGHT);
+		pango_font_description_set_absolute_size(fd, 24.0 * PANGO_SCALE);
+		pango_layout_set_font_description(lay, fd);
+		pango_layout_set_text(lay, server->dialog_row_label[i], -1);
+		int lw, lh;
+		pango_layout_get_pixel_size(lay, &lw, &lh);
+		cairo_new_path(cr);
+		cairo_move_to(cr, pad + 64.0, y + (row_h - lh) / 2);
+		pango_cairo_show_layout(cr, lay);
+		cairo_new_path(cr);
+		pango_font_description_free(fd);
+		g_object_unref(lay);
 	}
 	zt_buffer_show(server, &server->dialog_layer, buffer, cr, (int)w, (int)total_h);
 }
