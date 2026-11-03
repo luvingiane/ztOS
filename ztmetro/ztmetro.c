@@ -10503,6 +10503,18 @@ static void tone_rgb(int kelvin, float rgb[3]) {
 
 /* Switch the display itself off or on. Off, nothing is drawn and no frames
  * are scheduled; the power key brings it back. */
+/* The soft keys' backlight follows the display: on the OnePlus 2 it is the LED class
+ * device "button-backlight" (a GPIO LED on the PMIC, off by default). No such LED, no
+ * error: other phones simply lack the file. */
+static void button_backlight(bool on) {
+	int fd = open("/sys/class/leds/button-backlight/brightness", O_WRONLY | O_CLOEXEC);
+	if (fd < 0) return;
+	if (write(fd, on ? "1" : "0", 1) < 0) {
+		wlr_log(WLR_DEBUG, "button-backlight: %s", strerror(errno));
+	}
+	close(fd);
+}
+
 static void screen_set(struct zt_server *server, bool on) {
 	if (!on) {
 		server->dm_hidden = 1;	/* the DotMatrix home boots again when it is next seen */
@@ -10541,6 +10553,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		waydroid_power_request(demoloop || (waydroid_window(id) && !locking) ? "active" : "idle");
 		run_detached("ztos-waydroid-power", "sync", NULL, NULL);
 	}
+	button_backlight(on);
 	if (on) {
 		perf_tell("screen on\n");	/* clocks back up before the first frame */
 	}
@@ -14885,6 +14898,7 @@ int main(int argc, char *argv[]) {
 
     setenv("SUDO_ASKPASS", "/usr/local/bin/ztos-askpass", 1);
 	ctl_init(&server);
+	button_backlight(true);	/* the screen starts on: the soft keys with it */
     auth_init(&server);
     run_detached("ztos-polkit-agent", NULL, NULL, NULL);
 	run_detached("/usr/local/bin/ztos-sounds", NULL, NULL, NULL);
