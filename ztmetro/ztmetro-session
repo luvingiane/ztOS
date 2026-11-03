@@ -16,4 +16,6 @@ style=$(sed -n 's/^[[:space:]]*style[[:space:]]*=[[:space:]]*\([A-Za-z0-9]*\).*/
 case "$style" in dotmatrix|1) style=dotmatrix ;; *) style=metro ;; esac
 export ZTRF_SHELL_STYLE=$style
 systemctl --user set-environment ZTRF_SHELL_STYLE=$style >/dev/null 2>&1 || true
+# per-device environment (GPU choice and the like), e.g. the OnePlus 2 sets its Mesa/freedreno variables here
+[ -f /etc/ztos/session.env ] && . /etc/ztos/session.env
 exec /usr/local/bin/ztmetro >"$log" 2>&1
