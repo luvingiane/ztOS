@@ -9888,6 +9888,8 @@ static void perf_tell(const char *command) {
 
 /* The volume keys: a banner drops from the top with the level, as a count
  * out of thirty, and goes again two seconds after the last press. */
+#include "audioctl.h"
+
 /* The audio outputs, for the banner's last row. pactl is asked in the
  * background, into $XDG_RUNTIME_DIR/ztos-outputs ("*|name|description" for the
  * default, "-|..." for the others), and the banner only reads that file, so
@@ -9895,7 +9897,7 @@ static void perf_tell(const char *command) {
 #define OUTPUTS_SH \
 	"d=$(pactl get-default-sink 2>/dev/null); f=$XDG_RUNTIME_DIR/ztos-outputs; " \
 	"pactl list sinks 2>/dev/null | awk -v d=\"$d\" '/^\\tName:/ { n = $2 } " \
-	"/^\\tDescription:/ { sub(/^\\tDescription: /, \"\"); print (n == d ? \"*\" : \"-\") \"|\" n \"|\" $0 }' " \
+	"/^\\tDescription:/ { if (n ~ /Speaker__sink/) next; sub(/^\\tDescription: /, \"\"); print (n == d ? \"*\" : \"-\") \"|\" n \"|\" $0 }' " \
 	"> \"$f.new\" && mv \"$f.new\" \"$f\""
 static void outputs_refresh(void) {
 	run_detached("sh", "-c", OUTPUTS_SH, NULL);
@@ -9936,9 +9938,7 @@ static void output_next(struct zt_server *server) {
 		if (out[i].current) cur = i;
 	}
 	const char *to = out[(cur + 1) % n].name;
-	run_detached("sh", "-c", "pactl set-default-sink \"$0\" && "
-		"pactl list short sink-inputs | cut -f1 | while read -r i; do pactl move-sink-input \"$i\" \"$0\"; done; "
-		OUTPUTS_SH, to);
+	ac_set_output(to);
 	/* the file says so in a moment; the banner says so now */
 	char path[256];
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
@@ -10499,9 +10499,7 @@ static void volume_step(struct zt_server *server, int by) {
     animate(server, &server->volume_y, 0.0f, 140, 0, false);
     wl_event_source_timer_update(server->volume_timer, server->media ? 4000 : 2000);
     if (server->volume_is_media) {
-        char percent[16];
-        snprintf(percent, sizeof(percent), "%d%%", *level * 100 / VOLUME_MAX);
-        run_detached("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", percent);
+        ac_set_volume(*level * 100 / VOLUME_MAX);
     }
     hap(server, !server->volume_is_media && previous > 0 && *level == 0 ? HAP_TAP : HAP_TICK, HG_SYSTEM);
     if (!server->volume_is_media && *level != previous) {
@@ -14959,9 +14957,7 @@ int main(int argc, char *argv[]) {
     run_detached("ztos-polkit-agent", NULL, NULL, NULL);
 	run_detached("/usr/local/bin/ztos-sounds", NULL, NULL, NULL);
 	{
-		char percent[16];
-		snprintf(percent, sizeof(percent), "%d%%", server.volume * 100 / VOLUME_MAX);
-		run_detached("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", percent);
+		ac_set_volume(server.volume * 100 / VOLUME_MAX);
 	}
 	{
 		/* zrnperfd puts the shell first in line for the CPU (see there) */
