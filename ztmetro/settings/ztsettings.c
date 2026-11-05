@@ -137,6 +137,7 @@ enum action {
 	ACT_VIBE_PATTERN,
 	ACT_VIBE_PREVIEW,
 	ACT_OPEN_SOUND,
+	ACT_AUDIO_OUT,		/* arg: which output (speaker, Bluetooth speaker...) */
 	ACT_BATTERY_SAVER,
 	ACT_CPU_GOVERNOR,
 	ACT_ZRAM_TOGGLE,
@@ -2530,6 +2531,63 @@ static void ringtones_scan(void) {
 	free(files);
 }
 
+/* ---- audio output: the PipeWire sinks (pactl), picked here like a ringtone ---- */
+#define AUDIO_OUT_MAX 8
+static char audio_out_name[AUDIO_OUT_MAX][160];
+static char audio_out_desc[AUDIO_OUT_MAX][80];
+static int n_audio_out, audio_out_current;
+static time_t audio_out_at;
+
+/* a sink name is safe in a shell command only if it is plain */
+static bool audio_name_safe(const char *n) {
+	for (; *n; n++)
+		if (!((*n >= '0' && *n <= '9') || (*n >= 'a' && *n <= 'z') || (*n >= 'A' && *n <= 'Z') ||
+		      *n == '_' || *n == '.' || *n == '-' || *n == ':' || *n == '+'))
+			return false;
+	return true;
+}
+
+static void audio_out_scan(void) {
+	time_t now = time(NULL);
+	if (audio_out_at && now - audio_out_at < 3) return;
+	audio_out_at = now;
+	n_audio_out = 0;
+	char def[160] = "";
+	FILE *f = popen("pactl get-default-sink 2>/dev/null", "r");
+	if (f) {
+		if (fgets(def, sizeof(def), f)) def[strcspn(def, "\n")] = 0;
+		pclose(f);
+	}
+	f = popen("pactl list sinks 2>/dev/null | sed -n -e 's/^[ \t]*Name: //p' -e 's/^[ \t]*Description: /\t/p' | paste -sd'\n' | "
+		"awk 'NR%2==1{n=$0} NR%2==0{print n \"|\" substr($0,2)}'", "r");
+	if (!f) return;
+	char line[300];
+	while (n_audio_out < AUDIO_OUT_MAX && fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\n")] = 0;
+		char *bar = strchr(line, '|');
+		if (!bar) continue;
+		*bar = 0;
+		if (!audio_name_safe(line)) continue;
+		snprintf(audio_out_name[n_audio_out], sizeof(audio_out_name[0]), "%s", line);
+		snprintf(audio_out_desc[n_audio_out], sizeof(audio_out_desc[0]), "%s", bar + 1);
+		if (!strcmp(line, def)) audio_out_current = n_audio_out;
+		n_audio_out++;
+	}
+	pclose(f);
+}
+
+/* make it the default sink and move what is playing onto it */
+static void audio_out_choose(int i) {
+	if (i < 0 || i >= n_audio_out) return;
+	char cmd[512];
+	snprintf(cmd, sizeof(cmd), "n='%s'; pactl set-default-sink \"$n\" 2>/dev/null; "
+		"for i in $(pactl list short sink-inputs 2>/dev/null | cut -f1); do pactl move-sink-input \"$i\" \"$n\" 2>/dev/null; done &",
+		audio_out_name[i]);
+	if (system(cmd) != 0) {}
+	audio_out_current = i;
+	audio_out_at = 0;
+}
+
 /* a section of the page: its name in the accent colour, small, above its rows */
 static double audio_section(cairo_t *cr, double y, const char *title) {
 	zmc_accent(cr);
@@ -2539,6 +2597,19 @@ static double audio_section(cairo_t *cr, double y, const char *title) {
 
 static double draw_audio(cairo_t *cr) {
 	double y = zmc_header(cr, "ringtones + sounds");
+
+	y = audio_section(cr, y, "output");
+	audio_out_scan();
+	if (n_audio_out > 0) {
+		const char *outs[AUDIO_OUT_MAX];
+		for (int i = 0; i < n_audio_out; i++) outs[i] = audio_out_desc[i];
+		y = picker(cr, y, "Play sound on", outs, n_audio_out, audio_out_current, ACT_AUDIO_OUT);
+	} else {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, "no audio output found", FONT_REGULAR, 14, MARGIN, y, 0);
+		y += 40;
+	}
+	y += 14;
 
 	y = audio_section(cr, y, "volume");
 	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.media_vol, "Media + Apps", ACT_MEDIA_VOL_STEP);
@@ -3003,7 +3074,7 @@ static bool is_picker(int action) {
 	switch (action) {
 	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE: case ACT_NAV_SIZE_CYCLE:
 	case ACT_NETWORK_MODE: case ACT_COMP_ALGO_CYCLE: case ACT_PERF_PROFILE: case ACT_IB_MODE: case ACT_IB_ENGINE:
-	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
+	case ACT_RINGTONE: case ACT_VIBE_PATTERN: case ACT_AUDIO_OUT:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
 		return true;
@@ -3521,6 +3592,9 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_RINGTONE:
 		ringtone_choose(arg);
+		break;
+	case ACT_AUDIO_OUT:
+		audio_out_choose(arg);
 		break;
 	case ACT_VIBE_PATTERN:
 		if (arg >= 0 && arg < VIBE_N_KINDS) {
