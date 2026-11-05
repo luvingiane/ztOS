@@ -5219,6 +5219,10 @@ static void signal_sweep_kick(struct zt_server *server) {
 /* What ztoscorenetworkingd last wrote about the modem (and the Wi-Fi link): a small
  * file of key=value lines, read when it says so on the control pipe and with
  * the clock. Nothing here waits on a program. */
+/* No ztoscorenetworkingd report (a phone without the Samsung modem): the Wi-Fi
+ * signal is asked of NetworkManager here, see wifi_bars() */
+static bool g_wifi_own;
+
 static void modem_read(struct zt_server *server) {
 	FILE *f = fopen("/run/ztoscorenetworking/status", "r");
 	if (!f) f = fopen("/run/zrn-modem/status", "r");
@@ -5261,6 +5265,7 @@ static void modem_read(struct zt_server *server) {
 	}
 	if (wifi > -2) {
 		if (wifi >= 0) {
+			g_wifi_own = false;
 			server->wifi_bars = wifi;
 			server->wifi_read_ms = now_ms();
 		} else if (server->wifi_bars >= 0 && wifi_up()) {
@@ -5359,6 +5364,37 @@ static void status_pop_end(cairo_t *cr, float t) {
 	cairo_restore(cr);
 }
 
+/* The bars from the signal NetworkManager reports for the network in use
+ * (thresholds as ztoscorenetworkingd's). A helper writes it to a file every
+ * ten seconds and this reads the last answer: nothing here waits. -1: no answer. */
+static int wifi_signal_bars(uint32_t now) {
+	static uint32_t asked;
+	static int bars = -1;
+	const char *dir = getenv("XDG_RUNTIME_DIR");
+	if (!dir || g_nested) {
+		return -1;
+	}
+	char path[200], cmd[400];
+	snprintf(path, sizeof(path), "%s/ztmetro-wifi.sig", dir);
+	if (!asked || now - asked > 10000) {
+		asked = now ? now : 1;
+		snprintf(cmd, sizeof(cmd), "nmcli -t -f IN-USE,SIGNAL dev wifi 2>/dev/null | sed -n 's/^\\*://p' | head -1 > '%s.new' && mv '%s.new' '%s'", path, path, path);
+		run_detached("sh", "-c", cmd, NULL);
+	}
+	FILE *f = fopen(path, "r");
+	int sig = -1;
+	if (f) {
+		if (fscanf(f, "%d", &sig) != 1) {
+			sig = -1;
+		}
+		fclose(f);
+	}
+	if (sig >= 0) {
+		bars = sig >= 75 ? 3 : sig >= 50 ? 2 : sig >= 25 ? 1 : 0;
+	}
+	return bars;
+}
+
 /* How many of the Wi-Fi glyph's three bands to light, or -1 with no link.
  * Asked of the driver when the status row is drawn anyway (the minute, a
  * power event, the action centre) and kept for a few seconds, as the row is
@@ -5366,12 +5402,16 @@ static void status_pop_end(cairo_t *cr, float t) {
 static int wifi_bars(struct zt_server *server) {
 	uint32_t now = now_ms();
 	/* If ztoscorenetworkingd reported active bars, use it */
-	if (server->wifi_read_ms && now - server->wifi_read_ms < 40000 && server->wifi_bars >= 0) {
+	if (!g_wifi_own && server->wifi_read_ms && now - server->wifi_read_ms < 40000 && server->wifi_bars >= 0) {
 		return server->wifi_bars;
 	}
 	/* Without it or if ztoscorenetworkingd had -1: check sysfs carrier/operstate */
 	if (wifi_up()) {
-		if (server->wifi_bars < 0) {
+		g_wifi_own = true;
+		int b = wifi_signal_bars(now);
+		if (b >= 0) {
+			server->wifi_bars = b;
+		} else if (server->wifi_bars < 0) {
 			server->wifi_bars = 3;
 		}
 		server->wifi_read_ms = now ? now : 1;
