@@ -659,7 +659,7 @@ static char *nm_field(char **cursor) {
  * what it prints while the loading dots run. Nothing waits on it.
  */
 #define WIFI_QUERY "nmcli radio wifi 2>/dev/null; echo @list; " \
-	"nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list 2>/dev/null; echo @known; " \
+	"nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list --rescan no 2>/dev/null; echo @known; " \
 	"nmcli -t -f NAME connection show 2>/dev/null"
 
 static void bt_summary(char *out, size_t size);	/* Bluetooth, below */

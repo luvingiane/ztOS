@@ -5378,7 +5378,7 @@ static int wifi_signal_bars(uint32_t now) {
 	snprintf(path, sizeof(path), "%s/ztmetro-wifi.sig", dir);
 	if (!asked || now - asked > 10000) {
 		asked = now ? now : 1;
-		snprintf(cmd, sizeof(cmd), "nmcli -t -f IN-USE,SIGNAL dev wifi 2>/dev/null | sed -n 's/^\\*://p' | head -1 > '%s.new' && mv '%s.new' '%s'", path, path, path);
+		snprintf(cmd, sizeof(cmd), "nmcli -t -f IN-USE,SIGNAL dev wifi list --rescan no 2>/dev/null | sed -n 's/^\\*://p' | head -1 > '%s.new' && mv '%s.new' '%s'", path, path, path);
 		run_detached("sh", "-c", cmd, NULL);
 	}
 	FILE *f = fopen(path, "r");
