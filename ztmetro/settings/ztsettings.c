@@ -682,7 +682,11 @@ static void wifi_parse(char *text) {
 			char *signal = nm_field(&cursor), *security = nm_field(&cursor);
 			bool seen = !ssid[0];
 			for (int i = 0; i < app.n_networks; i++) {
-				if (strcmp(app.networks[i].ssid, ssid) == 0) seen = true;
+				if (strcmp(app.networks[i].ssid, ssid) != 0) continue;
+				/* one network on several bands: in use if any band is, with the best signal */
+				seen = true;
+				if (in_use[0] == '*') app.networks[i].in_use = true;
+				if (atoi(signal) > app.networks[i].signal) app.networks[i].signal = atoi(signal);
 			}
 			if (seen) continue;
 			struct network *n = &app.networks[app.n_networks++];
