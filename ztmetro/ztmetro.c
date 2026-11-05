@@ -712,6 +712,7 @@ struct zt_server {
 	/* power key held: the power menu instead of the screen toggle */
 	struct wl_event_source *power_hold_timer;
 	bool power_hold_done;
+	bool power_down;	/* the power key is held: volume down then takes a screenshot */
 	/* the alert slider (OnePlus 2): which end is held, the mode it set
 	 * (SLIDER_*, -1 before the first look) and the ring volume to go back to */
 	bool slider_top, slider_bottom, dnd;
@@ -12806,6 +12807,7 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	if (event->keycode == KEY_POWER) {
 		/* a short press sleeps and wakes the screen (on release), a long one
 		 * opens the power menu; the key goes no further */
+		server->power_down = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 			server->power_hold_done = false;
 			if (!server->power_hold_timer) {
@@ -12823,6 +12825,20 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 					activity(server);
 				}
 			}
+		}
+		return;
+	}
+	if (event->keycode == KEY_VOLUMEDOWN && server->power_down && server->screen_on) {
+		/* power + volume down: a screenshot into ~/Pictures; the power key's
+		 * release then neither sleeps the screen nor opens the menu */
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			server->power_hold_done = true;
+			if (server->power_hold_timer) {
+				wl_event_source_timer_update(server->power_hold_timer, 0);
+			}
+			run_detached("sh", "-c",
+				"grim \"$HOME/Pictures/Screenshot-$(date +%Y%m%d-%H%M%S).png\"", NULL);
+			hap(server, HAP_HEAVY, HG_SYSTEM);
 		}
 		return;
 	}
