@@ -10544,13 +10544,13 @@ static void volume_step(struct zt_server *server, int by) {
     *level = to < 0 ? 0 : to > VOLUME_MAX ? VOLUME_MAX : to;
     config_keep(server->volume_is_media ? "media_volume" : "ring_volume",
         (*level * 100 + VOLUME_MAX - 1) / VOLUME_MAX);
+    if (server->volume_is_media) {
+        ac_set_volume(*level * 100 / VOLUME_MAX);	/* first: with several outputs the banner shows each one's new level */
+    }
     outputs_refresh();	/* a headset may have come or gone: for the next look */
     draw_volume(server);
     animate(server, &server->volume_y, 0.0f, 140, 0, false);
     wl_event_source_timer_update(server->volume_timer, server->media ? 4000 : 2000);
-    if (server->volume_is_media) {
-        ac_set_volume(*level * 100 / VOLUME_MAX);
-    }
     hap(server, !server->volume_is_media && previous > 0 && *level == 0 ? HAP_TAP : HAP_TICK, HG_SYSTEM);
     if (!server->volume_is_media && *level != previous) {
         /* the ringer at its new level, as Windows Phone does: one pip after

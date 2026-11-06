@@ -145,14 +145,37 @@ static bool ac_ready(void) {
 	return false;
 }
 
-/* the default output's volume, in percent */
+static int ac_master = -1;	/* the keys' last level, in percent (-1: none yet) */
+
+/* The keys' volume, in percent. One output: the default sink's volume. Several play together: each
+ * output moves by the same step the keys made, so the gaps between them stay (as the master volume
+ * does on iOS: a receiver set lower stays lower, and none goes past 0 or 100). */
 static void ac_set_volume(int percent) {
 	if (!ac_ready()) return;
 	if (percent < 0) percent = 0;
 	if (percent > 150) percent = 150;
+	pa_threaded_mainloop_lock(ac_loop);
+	int step = ac_master >= 0 ? percent - ac_master : 0;
+	ac_master = percent;
+	if (ac_steer && ac_nsel > 1) {
+		for (int s = 0; s < ac_nsel; s++) {
+			for (int k = 0; k < ac_n; k++) {
+				if (strcmp(ac_list[k].name, ac_sel[s])) continue;
+				int v = ac_list[k].vol + step;
+				v = v < 0 ? 0 : v > 100 ? 100 : v;
+				pa_cvolume cv;
+				pa_cvolume_set(&cv, 2, (pa_volume_t)((uint64_t)v * PA_VOLUME_NORM / 100));
+				pa_operation *o = pa_context_set_sink_volume_by_name(ac_ctx, ac_sel[s], &cv, NULL, NULL);
+				if (o) pa_operation_unref(o);
+				ac_list[k].vol = v;
+			}
+		}
+		ac_dirty = true;
+		pa_threaded_mainloop_unlock(ac_loop);
+		return;
+	}
 	pa_cvolume cv;
 	pa_cvolume_set(&cv, 2, (pa_volume_t)((uint64_t)percent * PA_VOLUME_NORM / 100));
-	pa_threaded_mainloop_lock(ac_loop);
 	pa_operation *o = pa_context_set_sink_volume_by_name(ac_ctx, "@DEFAULT_SINK@", &cv, NULL, NULL);
 	if (o) pa_operation_unref(o);
 	pa_threaded_mainloop_unlock(ac_loop);
