@@ -2570,6 +2570,8 @@ static void audio_out_scan(void) {
 		if (!audio_name_safe(line)) continue;
 		/* the raw loudspeaker sits behind the boosted "Loudspeaker" (op2_speaker_boost): offer one */
 		if (strstr(line, "Speaker__sink")) continue;
+		/* the sink ztMETRO makes to play on several AirPlay receivers at once: picked in its volume banner */
+		if (!strncmp(line, "ztos_group", 10)) continue;
 		snprintf(audio_out_name[n_audio_out], sizeof(audio_out_name[0]), "%s", line);
 		snprintf(audio_out_desc[n_audio_out], sizeof(audio_out_desc[0]), "%s", bar + 1);
 		if (!strcmp(line, def)) audio_out_current = n_audio_out;
