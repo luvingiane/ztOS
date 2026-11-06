@@ -185,7 +185,7 @@ static int nav_h = NAV_BAR_H;
 #define MAX_CARDS	8	/* apps in the switcher */
 #define VOLUME_H	58
 #define MEDIA_H		74	/* what is playing, and its buttons, under the volume */
-#define OUTPUT_H	44	/* where the sound goes, at the banner's foot: tap for the next */
+#define OUTPUT_H	44	/* where the sound goes, at the banner's foot: tap for the list of outputs */
 #define TOAST_H		58	/* a notification's banner, where the volume's goes */
 #define TOAST_MS	4500
 #define MAX_NOTES	12
@@ -453,6 +453,7 @@ enum touch_role {
 	ROLE_BOARD,	/* while the app list's letters are up */
 	ROLE_HYPER,	/* on Hyperscan, the search over everything */
 	ROLE_RETRO,	/* on a ztRetrofit style's home (the DotMatrix launcher) */
+	ROLE_OUTVOL,	/* on an output's slider in the volume banner's list */
 };
 
 struct touch_point {
@@ -9890,73 +9891,43 @@ static void perf_tell(const char *command) {
  * out of thirty, and goes again two seconds after the last press. */
 #include "audioctl.h"
 
-/* The audio outputs, for the banner's last row. pactl is asked in the
- * background, into $XDG_RUNTIME_DIR/ztos-outputs ("*|name|description" for the
- * default, "-|..." for the others), and the banner only reads that file, so
- * drawing never waits on PipeWire. */
-#define OUTPUTS_SH \
-	"d=$(pactl get-default-sink 2>/dev/null); f=$XDG_RUNTIME_DIR/ztos-outputs; " \
-	"pactl list sinks 2>/dev/null | awk -v d=\"$d\" '/^\\tName:/ { n = $2 } " \
-	"/^\\tDescription:/ { if (n ~ /Speaker__sink/) next; sub(/^\\tDescription: /, \"\"); print (n == d ? \"*\" : \"-\") \"|\" n \"|\" $0 }' " \
-	"> \"$f.new\" && mv \"$f.new\" \"$f\""
-static void outputs_refresh(void) {
-	run_detached("sh", "-c", OUTPUTS_SH, NULL);
+/* The outputs, for the banner's last row and the list it opens. audioctl.h keeps them as the server
+ * reports them, so drawing never waits on PipeWire. The list is the AirPlay picker: a row for each
+ * output, a ring (filled and ticked for what plays now) and, when several play at once, a slider
+ * with that output's own volume. The keys' volume is the whole's. */
+#define OUT_ROW_H	56
+#define OUT_X0		52	/* where a row's text and its slider begin */
+static bool out_open;			/* the list is down */
+static int out_n;			/* its rows, as last drawn: what a finger meets */
+static struct ac_sink out_rows[AC_MAX];
+static uint32_t out_last_ms;		/* the last finger on it: the banner stays down while it is used */
+
+static uint32_t out_now_ms(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint32_t)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);
 }
 
-#define MAX_OUTPUTS 8
-struct output_entry { bool current; char name[160], desc[96]; };
-static int outputs_read(struct output_entry *out) {
-	char path[256], line[320];
-	const char *runtime = getenv("XDG_RUNTIME_DIR");
-	snprintf(path, sizeof(path), "%s/ztos-outputs", runtime ? runtime : "/tmp");
-	FILE *f = fopen(path, "r");
+static void outputs_refresh(void) {
+	ac_refresh();
+}
+
+/* how many outputs play now */
+static int out_playing(void) {
 	int n = 0;
-	while (f && n < MAX_OUTPUTS && fgets(line, sizeof(line), f)) {
-		line[strcspn(line, "\n")] = 0;
-		char *a = strchr(line, '|'), *b = a ? strchr(a + 1, '|') : NULL;
-		if (!a || !b) continue;
-		*a = *b = 0;
-		out[n].current = line[0] == '*';
-		snprintf(out[n].name, sizeof(out[n].name), "%s", a + 1);
-		snprintf(out[n].desc, sizeof(out[n].desc), "%s", b + 1);
-		n++;
+	for (int i = 0; i < out_n; i++) {
+		if (out_rows[i].sel) n++;
 	}
-	if (f) fclose(f);
 	return n;
 }
 
-/* The next output: made the default, and what plays now moved to it. The name
- * reaches the shell as $0, never inside the command. */
-static void output_next(struct zt_server *server) {
-	struct output_entry out[MAX_OUTPUTS];
-	int n = outputs_read(out), cur = 0;
-	if (n < 2) {
-		outputs_refresh();
-		return;
-	}
-	for (int i = 0; i < n; i++) {
-		if (out[i].current) cur = i;
-	}
-	const char *to = out[(cur + 1) % n].name;
-	ac_set_output(to);
-	/* the file says so in a moment; the banner says so now */
-	char path[256];
-	const char *runtime = getenv("XDG_RUNTIME_DIR");
-	snprintf(path, sizeof(path), "%s/ztos-outputs", runtime ? runtime : "/tmp");
-	FILE *f = fopen(path, "w");
-	for (int i = 0; f && i < n; i++) {
-		fprintf(f, "%c|%s|%s\n", i == (cur + 1) % n ? '*' : '-', out[i].name, out[i].desc);
-	}
-	if (f) fclose(f);
-	wlr_log(WLR_INFO, "audio output: %s", out[(cur + 1) % n].desc);
-}
-
 static double banner_h(struct zt_server *server) {
-	return VOLUME_H + (server->media ? MEDIA_H : 0) + OUTPUT_H;
+	return VOLUME_H + (server->media ? MEDIA_H : 0) + OUTPUT_H + (out_open ? out_n * OUT_ROW_H : 0);
 }
 
 static void draw_volume(struct zt_server *server) {
 	cairo_t *cr;
+	out_n = ac_outputs(out_rows);	/* the rows first: they make the banner taller */
 	double height = banner_h(server);
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, height, &cr);
 	cairo_set_source_rgb(cr, 0.12, 0.12, 0.12);
@@ -10010,23 +9981,75 @@ static void draw_volume(struct zt_server *server) {
 			cairo_fill(cr);
 		}
 	}
-	/* where it plays: the output's name, and the way to the next one */
-	struct output_entry out[MAX_OUTPUTS];
-	int n_out = outputs_read(out);
-	const char *where = "phone";
-	for (int i = 0; i < n_out; i++) {
-		if (out[i].current) where = out[i].desc;
+	/* where it plays: the output's name (and how many more play with it), and the way to the list */
+	char where[128] = "phone";
+	int playing = out_playing();
+	for (int i = 0; i < out_n; i++) {
+		if (out_rows[i].sel) {
+			snprintf(where, sizeof(where), "%s", out_rows[i].desc);
+			break;
+		}
 	}
-	double oy = height - OUTPUT_H;
+	if (playing > 1) {
+		char more[24];
+		snprintf(more, sizeof(more), " + %d", playing - 1);
+		strncat(where, more, sizeof(where) - strlen(where) - 1);
+	}
+	double oy = VOLUME_H + (server->media ? MEDIA_H : 0);
 	cairo_set_source_rgb(cr, 0.2, 0.2, 0.2);
 	cairo_rectangle(cr, 16, oy, server->width - 32, 1);
 	cairo_fill(cr);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	draw_icon(cr, "music", 16 + 9, oy + OUTPUT_H / 2, 16);
 	draw_text(cr, where, FONT_REGULAR, 13.5, 40, oy + 13, server->width - 40 - 96, 0, false);
-	if (n_out > 1) {
+	if (out_n > 1 || out_open) {
 		set_rgb(cr, server->accent);
-		draw_text(cr, "change ›", FONT_SEMIBOLD, 13.5, server->width - 16 - 70, oy + 13, 70, 0, false);
+		draw_text(cr, out_open ? "done" : "change ›", FONT_SEMIBOLD, 13.5, server->width - 16 - 70, oy + 13, 70, 0, false);
+	}
+	if (out_open) {
+		for (int i = 0; i < out_n; i++) {
+			const struct ac_sink *s = &out_rows[i];
+			double ry = oy + OUTPUT_H + i * OUT_ROW_H, cx = 16 + 11, cy = ry + 22;
+			const char *tag = s->airplay ? "AirPlay" : !strncmp(s->name, "bluez", 5) ? "Bluetooth" : "phone";
+			cairo_set_source_rgb(cr, 0.2, 0.2, 0.2);
+			cairo_rectangle(cr, 16, ry, server->width - 32, 1);
+			cairo_fill(cr);
+			if (s->sel) {
+				/* in what plays: a filled ring with a tick */
+				set_rgb(cr, server->accent);
+				cairo_arc(cr, cx, cy, 10, 0, 2 * M_PI);
+				cairo_fill(cr);
+				cairo_set_source_rgb(cr, 1, 1, 1);
+				cairo_set_line_width(cr, 2);
+				cairo_move_to(cr, cx - 4.5, cy);
+				cairo_line_to(cr, cx - 1, cy + 3.5);
+				cairo_line_to(cr, cx + 5, cy - 3.5);
+				cairo_stroke(cr);
+			} else {
+				cairo_set_source_rgb(cr, 0.45, 0.45, 0.45);
+				cairo_set_line_width(cr, 1.5);
+				cairo_arc(cr, cx, cy, 9.5, 0, 2 * M_PI);
+				cairo_stroke(cr);
+			}
+			if (s->sel) cairo_set_source_rgb(cr, 1, 1, 1);
+			else cairo_set_source_rgb(cr, 0.75, 0.75, 0.75);
+			draw_text(cr, s->desc, FONT_REGULAR, 14, OUT_X0, ry + 12, server->width - OUT_X0 - 16 - 70, 0, false);
+			cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
+			draw_text(cr, tag, FONT_REGULAR, 11.5, server->width - 16 - 64, ry + 14, 64, 0, false);
+			if (s->sel && playing > 1) {
+				/* this output's own volume, under its name */
+				double sy = ry + OUT_ROW_H - 14, sw = server->width - 16 - OUT_X0, kx = OUT_X0 + sw * s->vol / 100.0;
+				cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
+				cairo_rectangle(cr, OUT_X0, sy, sw, 3);
+				cairo_fill(cr);
+				set_rgb(cr, server->accent);
+				cairo_rectangle(cr, OUT_X0, sy, kx - OUT_X0, 3);
+				cairo_fill(cr);
+				cairo_set_source_rgb(cr, 1, 1, 1);
+				cairo_arc(cr, kx, sy + 1.5, 6, 0, 2 * M_PI);
+				cairo_fill(cr);
+			}
+		}
 	}
 	zt_buffer_show(server, &server->volume_layer, buffer, cr, server->width, height);
 }
@@ -10467,8 +10490,35 @@ static void uninstall_item(struct zt_server *server, int index) {
 	note_add(server, "System", "Removal started", name);
 }
 
+/* A finger on a row's slider: that output's own volume, from where it is along the bar. */
+static void out_slide(struct zt_server *server, int row, double x) {
+	if (row < 0 || row >= out_n) return;
+	int pct = (int)((x - OUT_X0) * 100.0 / (server->width - 16 - OUT_X0) + 0.5);
+	pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+	out_last_ms = out_now_ms();
+	if (pct == out_rows[row].vol) return;
+	ac_set_sink_volume(out_rows[row].name, pct);
+	out_rows[row].vol = pct;
+	draw_volume(server);
+	damage(server);
+}
+
 static int volume_hide(void *data) {
 	struct zt_server *server = data;
+	if (out_open) {
+		/* the list stays down while it is used (8 s since the last finger), and is drawn again
+		 * if the outputs have changed meanwhile (a receiver found or gone) */
+		if (out_now_ms() - out_last_ms < 8000) {
+			if (ac_changed()) {
+				draw_volume(server);
+				damage(server);
+			}
+			wl_event_source_timer_update(server->volume_timer, 1000);
+			return 0;
+		}
+		out_open = false;
+		draw_volume(server);
+	}
 	animate(server, &server->volume_y, (float)-(VOLUME_H + MEDIA_H + OUTPUT_H), 180, 0, false);
 	return 0;
 }
@@ -11283,12 +11333,34 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 				}
 			}
 		}
-		if (y >= banner_h(server) - OUTPUT_H) {
-			/* the output row: on to the next one */
+		double head = VOLUME_H + (server->media ? MEDIA_H : 0);	/* the output row's top */
+		if (y >= head && y < head + OUTPUT_H) {
+			/* the output row: the list of where the sound can go, down or away */
 			hap(server, HAP_TAP, HG_SYSTEM);
-			output_next(server);
+			out_open = !out_open;
+			out_last_ms = out_now_ms();
+			if (out_open) outputs_refresh();
 			draw_volume(server);
 			damage(server);
+		} else if (out_open && y >= head + OUTPUT_H) {
+			int row = (int)((y - head - OUTPUT_H) / OUT_ROW_H);
+			double in_row = y - head - OUTPUT_H - row * OUT_ROW_H;
+			out_last_ms = out_now_ms();
+			if (row < out_n && out_playing() > 1 && out_rows[row].sel && in_row >= OUT_ROW_H - 26) {
+				/* the slider under a name: the finger sets the volume there, and drags it */
+				p->role = ROLE_OUTVOL;
+				p->index = row;
+				out_slide(server, row, x);
+				wl_event_source_timer_update(server->volume_timer, 4000);
+				return;
+			}
+			if (row < out_n) {
+				/* a row: in or out of what plays (the AirPlay receivers can play together) */
+				hap(server, HAP_TAP, HG_SYSTEM);
+				ac_toggle(out_rows[row].name);
+				draw_volume(server);
+				damage(server);
+			}
 		}
 		wl_event_source_timer_update(server->volume_timer, 4000);
 		p->role = ROLE_NONE;
@@ -11582,6 +11654,15 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		p->moved = true;
 	}
 	switch (p->role) {
+	case ROLE_OUTVOL: {
+		/* dragging an output's slider: at most every 30 ms, the last place is set when the finger lifts */
+		static uint32_t last_slide;
+		if (time - last_slide >= 30) {
+			last_slide = time;
+			out_slide(server, p->index, x);
+		}
+		break;
+	}
 	case ROLE_RETRO:
 		if (server->dm) {
 			/* three fingers pushed up together: the launcher's settings */
@@ -12144,6 +12225,9 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		if (server->osk_visible) {
 			draw_osk(server);
 		}
+		break;
+	case ROLE_OUTVOL:
+		if (!cancelled) out_slide(server, p->index, p->x);
 		break;
 	case ROLE_CLIENT:
 		wlr_seat_touch_notify_up(server->seat, time, id);
