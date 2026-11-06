@@ -10540,12 +10540,21 @@ static void volume_step(struct zt_server *server, int by) {
     if (!server->volume_repeat_by)
         server->volume_is_media = server->audio_known ? server->audio_active : server->media_playing;
     int *level = server->volume_is_media ? &server->volume : &server->ring_volume;
+    /* several outputs play: the keys start from the loudest one, so they are never stuck at a level the outputs are not at */
+    int loudest = server->volume_is_media ? ac_group_master() : -1;
+    if (loudest >= 0) *level = (loudest * VOLUME_MAX + 50) / 100;
     int previous = *level, to = previous + by;
     *level = to < 0 ? 0 : to > VOLUME_MAX ? VOLUME_MAX : to;
     config_keep(server->volume_is_media ? "media_volume" : "ring_volume",
         (*level * 100 + VOLUME_MAX - 1) / VOLUME_MAX);
     if (server->volume_is_media) {
-        ac_set_volume(*level * 100 / VOLUME_MAX);	/* first: with several outputs the banner shows each one's new level */
+        /* first: with several outputs the banner shows each one's new level */
+        if (loudest >= 0) {
+            int moved = (*level - previous) * 100;
+            ac_group_step((moved + (moved < 0 ? -VOLUME_MAX / 2 : VOLUME_MAX / 2)) / VOLUME_MAX);
+        } else {
+            ac_set_volume(*level * 100 / VOLUME_MAX);
+        }
     }
     outputs_refresh();	/* a headset may have come or gone: for the next look */
     draw_volume(server);
