@@ -973,11 +973,25 @@ static void on_line(char *l)
 			*e = 0;
 			snprintf(now.call_number, sizeof(now.call_number), "%s", q + 1);
 		}
+		/* the OnePlus 2's modem (MPSS, AT over rpmsg) announces a call with
+		 * +CLIP alone, never RING: the call is coming in all the same */
+		if (strcmp(now.call, "incoming") && !call_answering && !call_dialled && !now.call[0]) {
+			fprintf(stderr, "ztoscorenetworkingd: modem: call coming in (+CLIP, no RING)\n");
+			call_set("incoming", "");
+			tell_shell("screen on\n");
+			tell_shell("call_screen\n");
+			call_poll_at = 0;
+		}
 	} else if (!fake_call && !strncmp(l, "+CLCC:", 6)) {
 		/* id,dir,stat,mode,mpty,"number",type */
-		int id, dir, stat;
+		int id, dir, stat, cmode = 0;
 		char *q = strchr(l, '"'), *e = q ? strchr(q + 1, '"') : NULL;
-		if (sscanf(l + 6, "%d,%d,%d", &id, &dir, &stat) == 3) {
+		/* mode 0 is a voice call: the OnePlus 2's modem also lists its data
+		 * connection here ("+CLCC: 1,1,0,1,0,...", mode 1), always, which is
+		 * no call */
+		if (sscanf(l + 6, "%d,%d,%d,%d", &id, &dir, &stat, &cmode) >= 3 && cmode != 0) {
+			/* not a call */
+		} else if (sscanf(l + 6, "%d,%d,%d", &id, &dir, &stat) == 3) {
 			if (q && e)
 				*e = 0;
 			call_seen = true;
