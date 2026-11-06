@@ -293,12 +293,37 @@ static void ac_group_loaded(pa_context *c, uint32_t idx, void *userdata) {
 	if (o) pa_operation_unref(o);
 }
 
+/* A receiver's connection can be dead while PipeWire still counts it as running (the receiver let
+ * go of the session): sound goes nowhere until it is torn down. Suspending the sink and waking it
+ * 0.7 s later makes the next sound open a new session, and every receiver chosen together starts
+ * at once. */
+static void ac_kick_resume(pa_mainloop_api *api, pa_time_event *e, const struct timeval *tv, void *userdata) {
+	(void)tv;
+	char *name = userdata;
+	api->time_free(e);
+	pa_operation *o = pa_context_suspend_sink_by_name(ac_ctx, name, 0, NULL, NULL);
+	if (o) pa_operation_unref(o);
+	free(name);
+}
+
+static void ac_kick(const char *name) {	/* the loop is locked */
+	pa_operation *o = pa_context_suspend_sink_by_name(ac_ctx, name, 1, NULL, NULL);
+	if (o) pa_operation_unref(o);
+	struct timeval tv;
+	pa_gettimeofday(&tv);
+	pa_timeval_add(&tv, 700 * PA_USEC_PER_MSEC);
+	pa_mainloop_api *api = pa_threaded_mainloop_get_api(ac_loop);
+	api->time_new(api, &tv, ac_kick_resume, strdup(name));
+}
+
 /* Play on what is chosen: one sink is made the default itself, several are joined into a group
  * sink (a new name each time, so the old one going away cannot clash with it). */
 static void ac_apply(void) {
 	if (!ac_ready()) return;
 	pa_threaded_mainloop_lock(ac_loop);
 	ac_steer = true;
+	for (int s = 0; s < ac_nsel; s++)
+		if (ac_is_airplay(ac_sel[s])) ac_kick(ac_sel[s]);
 	uint32_t old = ac_group_mod;
 	ac_group_mod = PA_INVALID_INDEX;
 	pa_operation *o;
