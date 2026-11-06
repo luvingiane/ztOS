@@ -18,6 +18,8 @@ export ZTRF_SHELL_STYLE=$style
 systemctl --user set-environment ZTRF_SHELL_STYLE=$style >/dev/null 2>&1 || true
 # ztMETRO is dark: tell libadwaita/GTK apps (they read this key, via dconf or the portal)
 gsettings set org.gnome.desktop.interface color-scheme prefer-dark >/dev/null 2>&1 || true
+# window buttons: close on the left, as the shell's own windows (GTK3/GTK4/libadwaita apps read this key)
+gsettings set org.gnome.desktop.wm.preferences button-layout 'close:' >/dev/null 2>&1 || true
 # per-device environment (GPU choice and the like), e.g. the OnePlus 2 sets its Mesa/freedreno variables here
 [ -f /etc/ztos/session.env ] && . /etc/ztos/session.env
 exec /usr/local/bin/ztmetro >"$log" 2>&1
