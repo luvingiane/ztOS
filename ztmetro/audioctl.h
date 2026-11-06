@@ -86,8 +86,26 @@ static void ac_refresh_in(pa_context *c) {
 	if (o) pa_operation_unref(o);
 }
 
+/* An output was picked here: from then on a new stream of an application follows it. PipeWire
+ * remembers the last output of each application and would send it back there. */
+static bool ac_steer;
+
+static void ac_input_cb(pa_context *c, const pa_sink_input_info *i, int eol, void *userdata) {
+	(void)userdata;
+	if (eol || !i || !ac_steer || !pa_proplist_gets(i->proplist, PA_PROP_APPLICATION_NAME)) return;
+	pa_operation *o = pa_context_move_sink_input_by_name(c, i->index, ac_nsel > 1 ? ac_group_name : ac_sel[0], NULL, NULL);
+	if (o) pa_operation_unref(o);
+}
+
 static void ac_event(pa_context *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata) {
-	(void)t; (void)idx; (void)userdata;
+	(void)userdata;
+	if ((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SINK_INPUT) {
+		if (ac_steer && (t & PA_SUBSCRIPTION_EVENT_TYPE_MASK) == PA_SUBSCRIPTION_EVENT_NEW) {
+			pa_operation *o = pa_context_get_sink_input_info(c, idx, ac_input_cb, NULL);
+			if (o) pa_operation_unref(o);
+		}
+		return;
+	}
 	ac_refresh_in(c);
 }
 
@@ -95,7 +113,8 @@ static void ac_state(pa_context *c, void *userdata) {
 	(void)userdata;
 	if (pa_context_get_state(c) == PA_CONTEXT_READY) {
 		pa_context_set_subscribe_callback(c, ac_event, NULL);
-		pa_operation *o = pa_context_subscribe(c, PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SERVER, NULL, NULL);
+		pa_operation *o = pa_context_subscribe(c, PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SERVER |
+			PA_SUBSCRIPTION_MASK_SINK_INPUT, NULL, NULL);
 		if (o) pa_operation_unref(o);
 		ac_refresh_in(c);
 	}
@@ -142,7 +161,8 @@ static void ac_set_volume(int percent) {
 static void ac_move_cb(pa_context *c, const pa_sink_input_info *i, int eol, void *userdata) {
 	char *name = userdata;
 	if (eol > 0) { free(name); return; }
-	if (!i) return;
+	/* only applications' streams: PipeWire's own (a group's legs, the speaker chain's output) stay put */
+	if (!i || !pa_proplist_gets(i->proplist, PA_PROP_APPLICATION_NAME)) return;
 	pa_operation *o = pa_context_move_sink_input_by_name(c, i->index, name, NULL, NULL);
 	if (o) pa_operation_unref(o);
 }
@@ -221,6 +241,7 @@ static void ac_group_loaded(pa_context *c, uint32_t idx, void *userdata) {
 static void ac_apply(void) {
 	if (!ac_ready()) return;
 	pa_threaded_mainloop_lock(ac_loop);
+	ac_steer = true;
 	uint32_t old = ac_group_mod;
 	ac_group_mod = PA_INVALID_INDEX;
 	pa_operation *o;
