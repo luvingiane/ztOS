@@ -843,7 +843,9 @@ static void on_line(char *l)
 		 * one says a bare ERROR, or nothing */
 		if (!strcmp(l, "OK") || !strncmp(l, "+CME ERROR", 10) || !strncmp(l, "+CMS ERROR", 10))
 			answered_since_poll = true;
-		if (!strncmp(sent, "AT+CLCC", 7) && !strcmp(l, "OK")) {
+		/* (the OnePlus 2's modem answers AT+CLCC with a bare ERROR when no call
+		 * exists, never OK: that is an empty list too) */
+		if (!strncmp(sent, "AT+CLCC", 7) && (!strcmp(l, "OK") || !strcmp(l, "ERROR"))) {
 			/* the list is empty twice running: it is over (once may be a late
 			 * OK, to an ATA, taken for the list's) */
 			if (release_since && !call_seen)
@@ -2248,6 +2250,10 @@ static void at_setup(void)
 	queue_at("AT+CREG=2");
 	queue_at("AT+CGREG=2");
 	queue_at("AT+CEREG=2");
+	/* messages arrive on the SIM ("SM") but this modem reads from "ME" until
+	 * told otherwise: AT+CMGR=6 then found nothing (the OnePlus 2: CPMS?
+	 * "ME",0,127,"ME",0,127,"SM",7,20) */
+	queue_at("AT+CPMS=\"SM\",\"SM\",\"SM\"");
 	queue_at("AT+CNMI=2,1,0,0,0");	/* new messages reported */
 	queue_at("AT+CLIP=1");		/* and who is calling */
 	queue_at("AT+CMGF=0");
