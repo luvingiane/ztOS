@@ -68,7 +68,7 @@ static void ac_sink_cb(pa_context *c, const pa_sink_info *i, int eol, void *user
 	struct ac_sink *s = &ac_stage[ac_stage_n++];
 	snprintf(s->name, sizeof(s->name), "%s", i->name);
 	snprintf(s->desc, sizeof(s->desc), "%s", i->description ? i->description : i->name);
-	s->vol = (int)((uint64_t)pa_cvolume_avg(&i->volume) * 100 / PA_VOLUME_NORM);
+	s->vol = (int)(((uint64_t)pa_cvolume_avg(&i->volume) * 100 + PA_VOLUME_NORM / 2) / PA_VOLUME_NORM);	/* rounded: truncating lost a point at every step */
 	s->airplay = ac_is_airplay(i->name);
 	s->sel = false;
 }
