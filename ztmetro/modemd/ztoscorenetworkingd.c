@@ -906,6 +906,12 @@ static void on_line(char *l)
 		if (q && e) {
 			*e = 0;
 			snprintf(now.operator, sizeof(now.operator), "%s", q + 1);
+			/* some networks give their name twice ("ho. ho.": short and long
+			 * name alike): shown once */
+			size_t n = strlen(now.operator);
+			if (n >= 3 && (n % 2) == 1 && now.operator[n / 2] == ' ' &&
+			    !strncmp(now.operator, now.operator + n / 2 + 1, n / 2))
+				now.operator[n / 2] = 0;
 		} else {
 			now.operator[0] = 0;
 		}
