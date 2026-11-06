@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static pa_threaded_mainloop *ac_loop;
@@ -139,7 +140,27 @@ static bool ac_ready(void) {
 		pa_context_state_t st = pa_context_get_state(ac_ctx);
 		pa_threaded_mainloop_unlock(ac_loop);
 		if (st == PA_CONTEXT_READY) return true;
-		if (st == PA_CONTEXT_FAILED || st == PA_CONTEXT_TERMINATED) return false;
+		if (st == PA_CONTEXT_FAILED || st == PA_CONTEXT_TERMINATED) {
+			/* The server went away (PipeWire restarted): a new connection, tried at most every 2 s.
+			 * What was loaded in the old server (the group) is gone with it. */
+			static time_t last_try;
+			time_t now = time(NULL);
+			if (now - last_try < 2) return false;
+			last_try = now;
+			pa_threaded_mainloop_lock(ac_loop);
+			pa_context_unref(ac_ctx);
+			ac_ctx = pa_context_new(pa_threaded_mainloop_get_api(ac_loop), "ztOS shell");
+			if (ac_ctx) {
+				pa_context_set_state_callback(ac_ctx, ac_state, NULL);
+				pa_context_connect(ac_ctx, NULL, PA_CONTEXT_NOFAIL, NULL);
+			}
+			ac_group_mod = PA_INVALID_INDEX;
+			ac_nsel = 0;		/* the list says again what the server plays on */
+			ac_steer = false;
+			pa_threaded_mainloop_unlock(ac_loop);
+			if (!ac_ctx) return false;
+			continue;
+		}
 		usleep(10000);
 	}
 	return false;
