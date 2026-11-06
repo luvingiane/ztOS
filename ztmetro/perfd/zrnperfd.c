@@ -184,7 +184,6 @@ static void detect_topology(void) {
 		}
 	}
 	globfree(&g);
-	if (n_clusters == 0) { clusters[0] = 0; cluster_cpus[0][0] = 0; cluster_cpus[0][1] = -1; n_clusters = 1; }
 	/* every present cpu */
 	cpu_count = 0;
 	for (int c = 0; c < 64; c++) {
@@ -193,6 +192,16 @@ static void detect_topology(void) {
 		if (access(path, F_OK) == 0) { cpu_count = c + 1; } else if (c > 0) { break; }
 	}
 	if (cpu_count < 1) { cpu_count = 1; }
+	/* no cpufreq policy to read the clusters from (the OnePlus 2's kernel has
+	 * none): one cluster of every present cpu. It used to be cpu0 alone, and
+	 * cores_allowed() then kept every program of the system on that one core. */
+	if (n_clusters == 0) {
+		int n = cpu_count < 15 ? cpu_count : 15;
+		clusters[0] = 0;
+		for (int c = 0; c < n; c++) { cluster_cpus[0][c] = c; }
+		cluster_cpus[0][n] = -1;
+		n_clusters = 1;
+	}
 	fprintf(stderr, "zrnperfd: %d cpus, %d clusters (first cpus", cpu_count, n_clusters);
 	for (int c = 0; c < n_clusters; c++) { fprintf(stderr, " %d", clusters[c]); }
 	fprintf(stderr, ")\n");
