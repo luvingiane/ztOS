@@ -10613,6 +10613,25 @@ static void button_backlight(bool on) {
 	close(fd);
 }
 
+/* The phone in a pocket: op2-sensord streams the proximity sensor while the screen is off and publishes
+ * "raw near" (near is 1) in /run/ztoscsf-sensors/prox. A wake that nobody asked for with a finger (a call or
+ * a message telling the shell to light the screen, a touched key) is not allowed while it says near.
+ * The power key is always allowed. ZTMETRO_POCKET=0 turns this off. */
+static bool pocket_blocks_wake(void) {
+	const char *e = getenv("ZTMETRO_POCKET");
+	if (e && e[0] == '0') {
+		return false;
+	}
+	FILE *f = fopen("/run/ztoscsf-sensors/prox", "r");
+	if (!f) {
+		return false;
+	}
+	int raw = 0, near = 0;
+	bool ok = fscanf(f, "%d %d", &raw, &near) == 2;
+	fclose(f);
+	return ok && near == 1;
+}
+
 static void screen_set(struct zt_server *server, bool on) {
 	if (!on) {
 		server->dm_hidden = 1;	/* the DotMatrix home boots again when it is next seen */
@@ -12680,8 +12699,12 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (strncmp(line, "screen off", 10) == 0) {
 		screen_set(server, false);
 	} else if (strncmp(line, "screen on", 9) == 0) {
-		screen_set(server, true);
-		activity(server);
+		if (!server->screen_on && pocket_blocks_wake()) {
+			wlr_log(WLR_INFO, "screen on: not lit, the proximity sensor says it is covered");
+		} else {
+			screen_set(server, true);
+			activity(server);
+		}
 	} else if (strncmp(line, "dialog_sensorhub", 16) == 0) {
 		dialog_show(server, "ztOSCoreSensorFramework",
 			"Sensor hub failed to initialize, please boot into twrp, go to reboot, and select system to hot-boot the sensor hub.",
@@ -12923,6 +12946,9 @@ static void slider_sync(struct zt_server *server) {
 	}
 }
 
+/* whether the phone's home key wakes the screen (ZTMETRO_NAV_WAKE=0: it does not) */
+static bool g_nav_wake = true;
+
 static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
 	struct zt_server *server = keyboard->server;
@@ -12986,9 +13012,19 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 		}
 	}
 	int nav = hwkey_nav(event->keycode);
+	if (nav == NAV_START && !server->screen_on && !g_nav_wake) {
+		/* a capacitive key (the OnePlus 2's) is touched by a pocket, and then
+		 * turns the screen on by itself: with ZTMETRO_NAV_WAKE=0 it does not
+		 * wake it, and neither do the other touch keys (nothing below runs
+		 * with the screen off) */
+		return;
+	}
 	if (nav == NAV_START && !server->screen_on &&
 	    event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* home wakes the screen, as the power key does */
+		/* home wakes the screen, as the power key does (not from a pocket) */
+		if (pocket_blocks_wake()) {
+			return;
+		}
 		screen_set(server, true);
 		activity(server);
 		server->hwkey_held = -1;	/* its release is not a Start press */
@@ -14791,6 +14827,10 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 
 int main(int argc, char *argv[]) {
 	wlr_log_init(getenv("ZTMETRO_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);
+	{
+		const char *nw = getenv("ZTMETRO_NAV_WAKE");
+		if (nw && nw[0] == '0') g_nav_wake = false;
+	}
 	/* children are reaped by the kernel; nothing here waits for them */
 	signal(SIGCHLD, SIG_IGN);
 
