@@ -19,6 +19,8 @@ rtkit
 pipewire-pulse
 pipewire-alsa
 wireplumber
+pipewire-zeroconf
+avahi
 
 # the session: greetd starts ztMETRO, the only shell ztOS has
 greetd
