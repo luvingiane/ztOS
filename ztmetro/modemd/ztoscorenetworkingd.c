@@ -175,9 +175,11 @@ static long ms(void)
 	return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static bool modem_off;	/* airplane mode on a phone whose modem crashes when its radio is switched off: it is stopped instead */
+
 static void queue_at(const char *fmt, ...)
 {
-	if (q_len == MAX_QUEUE)
+	if (q_len == MAX_QUEUE || modem_off)
 		return;
 	va_list ap;
 	va_start(ap, fmt);
@@ -1994,6 +1996,21 @@ static void ipc_readable(void)
 
 /* ---- the control pipe ---------------------------------------------------- */
 
+
+#define AIRPLANE_HELPER "/usr/local/bin/op2-airplane"
+
+static void spawn_helper(const char *arg)
+{
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		execl(AIRPLANE_HELPER, AIRPLANE_HELPER, arg, (char *)NULL);
+		_exit(127);
+	}
+	if (pid > 0)
+		signal(SIGCHLD, SIG_IGN);
+}
+
 static void command(char *l)
 {
 	if (strncmp(l, "sms ", 4) && strncmp(l, "smse ", 5))
@@ -2038,7 +2055,24 @@ static void command(char *l)
 		airplane_asked = true;
 	else if (!strcmp(l, "airplane off"))
 		airplane_asked = false;
-	if (!strcmp(l, "airplane on")) {
+	if (!strcmp(l, "airplane on") && access(AIRPLANE_HELPER, X_OK) == 0) {
+		/* (the MSM8994 modem dies with a fatal error on AT+CFUN=4 and on a deregistration while it is
+		 * registered: the helper stops it, and the daemon lets go of its port) */
+		modem_off = true;
+		q_len = 0;
+		busy = false;
+		if (at_fd >= 0) {
+			close(at_fd);
+			at_fd = -1;
+		}
+		now.airplane = true;
+		now.eps_reg = now.cs_reg = now.ps_reg = 0;
+		now.bars = 0;
+		spawn_helper("on");
+	} else if (!strcmp(l, "airplane off") && modem_off) {
+		/* the helper brings the modem up again and restarts this daemon: it reopens the port by itself */
+		spawn_helper("off");
+	} else if (!strcmp(l, "airplane on")) {
 		queue_at("AT+CFUN=4");
 		queue_at("AT+CFUN?");
 	} else if (!strcmp(l, "airplane off")) {
