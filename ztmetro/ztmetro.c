@@ -10557,9 +10557,11 @@ static void volume_step(struct zt_server *server, int by) {
         }
     }
     outputs_refresh();	/* a headset may have come or gone: for the next look */
-    draw_volume(server);
-    animate(server, &server->volume_y, 0.0f, 140, 0, false);
-    wl_event_source_timer_update(server->volume_timer, server->media ? 4000 : 2000);
+    if (server->screen_on) {	/* with the screen off there is nothing to show the banner on */
+        draw_volume(server);
+        animate(server, &server->volume_y, 0.0f, 140, 0, false);
+        wl_event_source_timer_update(server->volume_timer, server->media ? 4000 : 2000);
+    }
     hap(server, !server->volume_is_media && previous > 0 && *level == 0 ? HAP_TAP : HAP_TICK, HG_SYSTEM);
     if (!server->volume_is_media && *level != previous) {
         /* the ringer at its new level, as Windows Phone does: one pip after
@@ -12985,9 +12987,10 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 		}
 		return;
 	}
-	if (event->keycode == KEY_VOLUMEDOWN && server->power_down && server->screen_on) {
-		/* power + volume down: a screenshot into ~/Pictures; the power key's
-		 * release then neither sleeps the screen nor opens the menu */
+	if (event->keycode == KEY_VOLUMEUP && server->power_down && server->screen_on) {
+		/* power + volume up: a screenshot into ~/Pictures (volume down stays the volume, as on a phone that
+		 * has no key of its own for it); the power key's release then neither sleeps the screen nor opens
+		 * the menu */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 			server->power_hold_done = true;
 			if (server->power_hold_timer) {
@@ -13028,6 +13031,15 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 		screen_set(server, true);
 		activity(server);
 		server->hwkey_held = -1;	/* its release is not a Start press */
+		return;
+	}
+	if (!server->screen_on && (event->keycode == KEY_VOLUMEUP || event->keycode == KEY_VOLUMEDOWN)) {
+		/* the volume keys work with the screen off (music, a ringer): one step per press, nothing drawn, the
+		 * screen stays off and does not count as activity; held keys do not repeat (volume_repeat stops) */
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && !demoloop_active()) {
+			server->volume_repeat_by = 0;
+			volume_step(server, event->keycode == KEY_VOLUMEUP ? 1 : -1);
+		}
 		return;
 	}
 	if (!server->screen_on) {
